@@ -9,13 +9,12 @@ import json
 
 
 def get_connection():
-    # Replace these with your actual MySQL credentials
     username = "root"
-    password = "Harsha%40123"
+    password = "Harshaaa@123"
     hostname = "localhost"
     database = "phonepe"
 
-    engine = create_engine(f"mysql+pymysql://{'root'}:{'Harsha%40123'}@{'localhost'}/{'phonepe'}")
+    engine = create_engine(f"mysql+pymysql://{'root'}:{'Harshaaa%40123'}@{'localhost'}/{'phonepe'}")
     return engine.raw_connection()
 
 def show_table_columns():
@@ -271,10 +270,334 @@ def show_insurance_growth():
     color_continuous_scale='Viridis',
     title="Insurance Growth Quarters by State"
     )
-    st.plotly_chart(fig)    
+    st.plotly_chart(fig)
+
+def show_transaction_by_state_year():
+    conn = get_connection()
+    query = """
+    SELECT States, Years, SUM(Transaction_amount) AS Total_Amount
+    FROM agg_transaction
+    GROUP BY States, Years
+    ORDER BY States, Years
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    # Normalize column names
+    df.columns = df.columns.str.strip().str.lower()
+
+    st.subheader("📊 Yearly Transaction Trends by State")
+
+    # Defensive check
+    required_cols = {'states', 'years', 'total_amount'}
+    if not required_cols.issubset(df.columns):
+        st.warning("Missing required columns. Please verify the query and schema.")
+        return
+
+    # Line Chart: Transaction trend over years for selected state
+    selected_state = st.selectbox("Select State", sorted(df['states'].unique()))
+    state_df = df[df['states'] == selected_state]
+
+    fig_line = px.line(
+        state_df,
+        x='years',
+        y='total_amount',
+        markers=True,
+        title=f"Yearly Transaction Trend for {selected_state}",
+        labels={'total_amount': 'Transaction Value'}
+    )
+    st.plotly_chart(fig_line)
+
+    # Heatmap: Transaction density across states and years
+    pivot_df = df.pivot(index='states', columns='years', values='total_amount')
+    fig_heatmap = px.imshow(
+        pivot_df,
+        labels=dict(x="Year", y="State", color="Transaction Value"),
+        title="Transaction Density Heatmap (States vs Years)",
+        aspect="auto",
+        color_continuous_scale="Viridis"
+    )
+    st.plotly_chart(fig_heatmap)    
 
 st.set_page_config(layout='wide')
 st.title('PhonePe Transaction Insights')
+
+def show_underutilized_devices_by_state():
+    conn = get_connection()
+    query = """
+    SELECT States, Device_brand,
+           SUM(RegisteredUsers) AS Total_Registered,
+           SUM(AppOpens) AS Total_AppOpens,
+           ROUND(SUM(AppOpens) / NULLIF(SUM(RegisteredUsers), 0), 2) AS OpenRate
+    FROM agg_user
+    GROUP BY States, Device_brand
+    HAVING SUM(RegisteredUsers) > 10000 AND OpenRate < 0.3
+    ORDER BY States, OpenRate ASC;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    st.subheader("📍 Underutilized Devices Grouped by State")
+    if df['OpenRate'].nunique() <= 1:
+        color_col = 'Total_Registered'
+        color_scale = 'Blues'
+        color_title = 'Total Registered Users'
+    else:
+        color_col = 'OpenRate'
+        color_scale = 'Reds'
+        color_title = 'Open Rate'
+
+    fig = px.treemap(
+        df,
+        path=['States', 'Device_brand'],
+        values='Total_Registered',
+        color=color_col,
+        color_continuous_scale=color_scale,
+        title="Treemap of Underutilized Devices by State"
+    )
+
+    fig.update_traces(
+        marker=dict(line=dict(width=0.5, color='black')),
+        texttemplate='%{label}<br>%{color:.2f} ' + color_title
+    )
+
+    st.plotly_chart(fig)
+
+def show_state_volatility_summary():
+    conn = get_connection()
+    query = """
+    WITH joined AS (
+        SELECT curr.States, curr.Device_brand,
+               curr.User_count - prev.User_count AS UserCount_Change,
+               curr.AppOpens - prev.AppOpens AS AppOpens_Change,
+               curr.Usage_percentage - prev.Usage_percentage AS UsageChange
+        FROM agg_user AS curr
+        JOIN agg_user AS prev ON curr.States = prev.States
+            AND curr.Device_brand = prev.Device_brand
+            AND curr.Years = prev.Years
+            AND curr.Quarter = prev.Quarter + 1
+    )
+    SELECT States,
+           ROUND(AVG(UserCount_Change), 2) AS Avg_UserCount_Change,
+           ROUND(AVG(AppOpens_Change), 2) AS Avg_AppOpens_Change,
+           ROUND(AVG(UsageChange), 2) AS Avg_UsageChange
+    FROM joined
+    GROUP BY States
+    ORDER BY Avg_UsageChange ASC;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    st.subheader("📊 Volatility Summary by State")
+    fig = px.scatter(
+        df,
+        x='Avg_AppOpens_Change',  # ✅ Use exact column name
+        y='Avg_UsageChange',
+        color='States',
+        size='Avg_UserCount_Change',
+        title='State-wise App Usage Volatility'
+    )
+    st.plotly_chart(fig)
+
+def show_engagement_by_state():
+    # 🎯 Year and Quarter selection with unique keys
+    year = st.selectbox("Select Year", options=list(range(2018, 2025)), index=0, key="engagement_year")
+    quarter = st.selectbox("Select Quarter", options=[1, 2, 3, 4], index=0, key="engagement_quarter")
+
+    # 🔌 Fetch data
+    conn = get_connection()
+    query = f"""
+    SELECT States,
+           SUM(RegisteredUsers) AS Total_Users,
+           SUM(AppOpens) AS Total_AppOpens,
+           ROUND(SUM(AppOpens) / NULLIF(SUM(RegisteredUsers), 0), 2) AS EngagementRate
+    FROM map_user
+    WHERE Years = {year} AND Quarter = {quarter}
+    GROUP BY States
+    ORDER BY EngagementRate DESC;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    # 🧼 Normalize column names
+    df.columns = df.columns.str.strip().str.lower()
+
+    # 🚨 Handle empty data
+    if df.empty:
+        st.warning("No data available for the selected year and quarter.")
+        return
+
+    # 📊 Chart title
+    st.subheader(f"📱 Engagement Rate by State ({year} Q{quarter})")
+
+    # 🌞 Sunburst chart: size by Total_Users, color by EngagementRate
+    fig = px.sunburst(
+        df,
+        path=['states'],
+        values='total_users',
+        color='engagementrate',
+        color_continuous_scale='Blues',
+        title="Engagement Breakdown by State"
+    )
+    st.plotly_chart(fig)
+
+def show_conversion_funnel():
+    conn = get_connection()
+    query = """
+    SELECT 
+    a.States,
+    a.Quarter,
+    SUM(a.Transaction_count) AS InsuranceTxns,
+    SUM(u.RegisteredUsers) AS RegisteredUsers,
+    SUM(u.AppOpens) AS AppOpens,
+    ROUND(SUM(u.AppOpens) / NULLIF(SUM(u.RegisteredUsers), 0), 2) AS EngagementRate
+    FROM agg_insurance a
+    JOIN agg_user u ON a.States = u.States AND a.Quarter = u.Quarter
+    GROUP BY a.States, a.Quarter
+    ORDER BY a.States, a.Quarter
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    fig = px.line(
+        df,
+        x="Quarter",
+        y="EngagementRate",
+        color="States",
+        title="📈 Quarterly Engagement Rate by State"
+    )
+    st.plotly_chart(fig)
+
+def show_policy_type_distribution():
+    conn = get_connection()
+    query = """
+    SELECT 
+    States,
+    Transaction_type AS PolicyType,
+    SUM(Transaction_count) AS Count
+    FROM agg_insurance
+    GROUP BY States, Transaction_type;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    fig = px.sunburst(
+        df,
+        path=["States", "PolicyType"],
+        values="Count",  # Capital C
+        title="🌞 Policy Type Distribution by State"
+    )
+    st.plotly_chart(fig)   
+
+def show_transaction_volatility():
+    conn = get_connection()
+    query = """
+    SELECT States, Quarter, SUM(Transaction_amount) AS TxnAmount
+    FROM agg_trans
+    GROUP BY States, Quarter
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    # Calculate volatility (standard deviation across quarters)
+    volatility_df = df.groupby("States")["TxnAmount"].std().reset_index()
+    volatility_df.columns = ["States", "Volatility"]
+
+    fig = px.bar(
+        volatility_df.sort_values("Volatility", ascending=False).head(10),
+        x="States",
+        y="Volatility",
+        title="📉 Top 10 States by Transaction Volatility",
+        labels={"Volatility": "Std Dev of Transaction Amount"}
+    )
+    st.plotly_chart(fig) 
+
+def show_transaction_type_mix():
+    conn = get_connection()
+    query = """
+    SELECT States, Transaction_type, SUM(Transaction_amount) AS Amount
+    FROM agg_trans
+    GROUP BY States, Transaction_type
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    fig = px.sunburst(
+        df,
+        path=["States", "Transaction_type"],
+        values="Amount",
+        title="🌞 Transaction Type Distribution by State (Sunburst View)"
+    )
+    st.plotly_chart(fig)    
+
+def show_yoy_growth_heatmap():
+    conn = get_connection()
+    query = """
+    SELECT States, Years, SUM(Transaction_amount) AS TxnAmount
+    FROM agg_trans
+    GROUP BY States, Years
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    df = df.sort_values(["States", "Years"])
+    df["YoY_Growth"] = df.groupby("States")["TxnAmount"].pct_change().round(2)
+
+    pivot_df = df.pivot(index="States", columns="Years", values="YoY_Growth")
+
+    fig = px.imshow(
+        pivot_df,
+        color_continuous_scale="RdYlGn",
+        title="🔥 Year-over-Year Growth Heatmap by State",
+        labels=dict(x="Year", y="State", color="YoY Growth")
+    )
+    st.plotly_chart(fig)
+
+def show_device_brand_treemap():
+    conn = get_connection()
+    query = """
+    SELECT Device_brand, SUM(User_count) AS TotalUsers
+    FROM agg_user
+    GROUP BY Device_brand;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    fig = px.treemap(
+        df,
+        path=["Device_brand"],
+        values="TotalUsers",
+        title="📱 Device Brand Distribution Among Users"
+    )
+    st.plotly_chart(fig)
+
+def show_district_engagement_chord():
+    conn = get_connection()
+    query = """
+    SELECT District, SUM(RegisteredUsers) AS Users, SUM(AppOpens) AS Opens
+    FROM map_user
+    GROUP BY District
+    LIMIT 100;
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    # Prepare source-target pairs for chord-like flow
+    df_long = pd.melt(df, id_vars="District", value_vars=["Users", "Opens"],
+                      var_name="EngagementType", value_name="Value")
+
+    fig = px.sunburst(
+        df_long,
+        path=["EngagementType", "District"],
+        values="Value",
+        title="🧭 District-Level Engagement Flow"
+    )
+    st.plotly_chart(fig)              
 
 with st.sidebar:
     selected_menu = st.selectbox("Main Menu", ["Select", "Home", "Business Case Study"])
@@ -401,6 +724,8 @@ if selected_menu == 'Business Case Study':
         show_declining_regions()
         show_volatility()
         show_trend_summary()
+        show_transaction_by_state_year()
+
 
     elif scenario == "Device Dominance and User Engagement Analysis":
         st.markdown("""
@@ -414,6 +739,9 @@ if selected_menu == 'Business Case Study':
         quarter = st.selectbox("Select Quarter", [1, 2, 3, 4])
         show_map_snapshot(year, quarter)
         show_trend_summary()
+        show_underutilized_devices_by_state()
+        show_state_volatility_summary()
+        show_engagement_by_state()
 
     elif scenario == "Insurance Penetration and Growth Potential Analysis":
         st.markdown("""
@@ -427,6 +755,9 @@ if selected_menu == 'Business Case Study':
         year = st.selectbox("Select Year for Insurance Snapshot", get_years())
         quarter = st.selectbox("Select Quarter", [1, 2, 3, 4])
         show_map_snapshot(year, quarter)
+        show_conversion_funnel()
+        show_policy_type_distribution()
+
 
     elif scenario == "Transaction Analysis for Market Expansion":
         st.markdown("""
@@ -439,6 +770,9 @@ if selected_menu == 'Business Case Study':
         quarter = st.selectbox("Select Quarter", [1, 2, 3, 4])
         show_map_snapshot(year, quarter)
         show_growth_regions()
+        show_transaction_volatility()
+        show_transaction_type_mix()
+        show_yoy_growth_heatmap()
 
     elif scenario == "User Engagement and Growth Strategy":
         st.markdown("""
@@ -452,3 +786,5 @@ if selected_menu == 'Business Case Study':
         year = st.selectbox("Select Year for Pincode Engagement", get_years())
         quarter = st.selectbox("Select Quarter", [1, 2, 3, 4])
         show_pincode_engagement_map(year, quarter)
+        show_device_brand_treemap()
+        show_district_engagement_chord()
